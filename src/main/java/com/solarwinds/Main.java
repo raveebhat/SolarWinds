@@ -7,11 +7,10 @@ import com.solarwinds.repo.InMemoryUserRepo;
 import com.solarwinds.service.ApprovalService;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-//TIP To <b>Run</b> code, press <shortcut actionId="Run"/> or
-// click the <icon src="AllIcons.Actions.Execute"/> icon in the gutter.
 public class Main {
     public static void main(String[] args) {
         var userRepo = new InMemoryUserRepo();
@@ -30,7 +29,9 @@ public class Main {
         userRepo.save(kumar);
         userRepo.save(aditya);
 
-        String json = ""; // Read from file
+        var requester = new User("u-requester", "Renter", "tenantA", Set.of(Role.REQUESTER));
+        userRepo.save(requester);
+
 
         var t = new WorkflowTemplate();
         t.id = "tmpl-expense-basic";
@@ -51,13 +52,63 @@ public class Main {
         s3.id = "s3";
         s3.name = "Legal Review";
         s3.role = Role.LEGAL;
+        s3.condition = "requiresLegal=yes";
+
+        t.steps = List.of(s1, s2, s3);
+        templateRepo.save(t);
 
         var service = new ApprovalService(userRepo, templateRepo, reqRepo);
 
-        var req = service.createRequest("tenantA", "u-requester", "EXPENSE", Map.of("requestLegal", "yes"));
-        service.submitRequest(req.id, "tmpl-expense-basic");
+        // Scenario 1: Submit and fully approve (legal skipped)
+        var meta1 = new HashMap<String, String>();
+        meta1.put("amount", "1500");
+        meta1.put("requiresLegal", "no");
 
-        System.out.println("Req created/in-review? status =" + service.act("u-mahesh", req.id, Action.APPROVE, "ok").status);
+        var req1 = service.createRequest("tenantA", "u-requester", "EXPENSE", meta1);
+        System.out.println("Created request id=" + req1.id);
+        service.submitRequest(req1.id, "tmpl-expense-basic");
+        System.out.println("After submit, status=" + service.act("u-mahesh", req1.id, Action.APPROVE, "Manager OK").status);
+        System.out.println("After Finance approve, status=" + service.act("u-suresh", req1.id, Action.APPROVE, "Finance OK").status);
 
+        // Scenario 2: Rejection at step 2
+        var meta2 = new HashMap<String, String>();
+        meta2.put("amount", "5000");
+        meta2.put("requiresLegal", "yes");
+
+        var req2 = service.createRequest("tenantA", "u-requester", "EXPENSE", meta2);
+        System.out.println("Created request id=" + req2.id);
+        service.submitRequest(req2.id, "tmpl-expense-basic");
+        System.out.println("After submit, status=" + service.act("u-mahesh", req2.id, Action.APPROVE, "Manager OK").status);
+        System.out.println("After Finance reject, status=" + service.act("u-suresh", req2.id, Action.REJECT, "Insufficient docs").status);
+
+        // Scenario 3: Tenant Isolation
+        var tasksAditya = service.tasksForApprover("u-aditya");
+        System.out.println("Aditya tasks(tenantB) should be 0: " + tasksAditya.size());
+
+        // Scenario 4: Preflight missing approver chheck
+        // Create a template with a role that has no users in tenantA
+        var tpl2 = new WorkflowTemplate();
+        t.id = "tmpl-missing";
+        t.version = 1;
+        t.name = "Missing Approver Demo";
+
+        var sx = new StepDef();
+        sx.id = "sx";
+        sx.name = "Auditor Check";
+        sx.role = Role.AUDITOR;
+        tpl2.steps = List.of(sx);
+        templateRepo.save(tpl2);
+
+        var req4 = service.createRequest("tenantA", "u-requester", "EXPENSE", Map.of());
+
+        try {
+            service.submitRequest(req4.id, "tmpl-missing");
+            System.out.println("ERROR: should have failed preflight for missing approver");
+        }
+        catch (Exception exception) {
+            System.out.println("Expected preflight failure: " + exception.getMessage());
+        }
+
+        System.out.println("Demo complete");
     }
 }

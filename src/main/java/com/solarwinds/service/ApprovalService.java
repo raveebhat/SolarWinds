@@ -73,7 +73,7 @@ public class ApprovalService {
             var req = requests.findById(requestId).orElseThrow();
 
             if (!user.tenantId().equals(approverId)) {
-                throw new SecurityException("Tenantt mismatch");
+                throw new SecurityException("Tenant mismatch");
             }
 
             if (req.requesterId.equals(approverId)) {
