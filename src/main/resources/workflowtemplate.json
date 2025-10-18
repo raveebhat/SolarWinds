@@ -1,0 +1,22 @@
+{
+  "id": "tmpl-expense-basic",
+  "version": 1,
+  "name": "Basic Expense Approval",
+  "steps": [
+    {
+      "id": "s1",
+      "name": "Manager Review",
+      "role": "MANAGER"
+    },
+    {
+      "id": "s2",
+      "name": "Finance Review",
+      "role": "FINANCE"
+    },
+    {
+      "id": "s3",
+      "name": "LEGAL Review",
+      "role": "LEGAL"
+    }
+  ]
+}
