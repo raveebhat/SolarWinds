@@ -1,4 +1,4 @@
-# Expense Approval Workflow — Machine Coding Submission
+# Expense Approval Workflow
 
 **Language:** Java 17  
 **Build:** Maven
