@@ -10,7 +10,7 @@ public class Request {
     public final String category;
     public final Map<String, String> metadata; // amount, invoiceId etc
     public RequestStatus status;
-    public WorkFlowInstance workFlowInstance;
+    public WorkflowInstance workflowInstance;
     public final Instant createdAt;
 
     public Request(String id, String tenantId, String requesterId, String category, Map<String, String> metadata) {

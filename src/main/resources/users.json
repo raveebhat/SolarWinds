@@ -1,0 +1,7 @@
+[
+  { "id": "u-mahesh",   "name": "Mahesh Manager",  "tenantId": "tenantA", "roles": ["MANAGER"] },
+  { "id": "u-suresh",   "name": "Suresh Finance",  "tenantId": "tenantA", "roles": ["FINANCE"] },
+  { "id": "u-kumar",    "name": "Kumar Legal",     "tenantId": "tenantA", "roles": ["LEGAL"] },
+  { "id": "u-aditya",   "name": "Aditya Manager",  "tenantId": "tenantB", "roles": ["MANAGER"] },
+  { "id": "u-requester","name": "Renter",          "tenantId": "tenantA", "roles": ["REQUESTER"] }
+]

@@ -5,7 +5,7 @@ import com.solarwinds.domain.User;
 
 import java.util.*;
 
-public class InMemoryUserRepo implements UserRepository{
+public class InMemoryUserRepository implements UserRepository{
 
     private final Map<String, User> users = new HashMap<>();
 

@@ -9,129 +9,178 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.stream.Collectors;
 
 public class ApprovalService {
 
-    private final UserRepository users;
-    private final TemplateRepository templates;
-    private final RequestRepository requests;
+    private final UserRepository userRepo;
+    private final TemplateRepository templateRepo;
+    private final RequestRepository requestRepo;
 
-    public ApprovalService(UserRepository users, TemplateRepository templates, RequestRepository requests) {
-        this.users = users;
-        this.templates = templates;
-        this.requests = requests;
+    public ApprovalService(UserRepository userRepo, TemplateRepository templateRepo, RequestRepository requestRepo) {
+        this.userRepo = userRepo;
+        this.templateRepo = templateRepo;
+        this.requestRepo = requestRepo;
     }
 
     public Request createRequest(String tenantId, String requesterId, String category, Map<String, String> metadata) {
         var id = UUID.randomUUID().toString();
         var request = new Request(id, tenantId, requesterId, category, metadata);
-        requests.save(request);
+        requestRepo.save(request);
         return request;
     }
 
     // Submit with validation (ensures every step has at least one approver)
     public Request submitRequest(String requestId, String templateId) {
-        var req = requests.findById(requestId).orElseThrow(() -> new IllegalArgumentException("req not found"));
-        var template = templates.findLatestById(templateId).orElseThrow(() -> new IllegalArgumentException("template ot found"));
+        var reqOpt = requestRepo.findById(requestId);
+        if (reqOpt == null || reqOpt.isEmpty()) throw new IllegalArgumentException("Request not found: " + requestId);
+        var req = reqOpt.get();
+
+        var tplOpt = templateRepo.findLatestById(templateId);
+        if (tplOpt == null || tplOpt.isEmpty()) throw new IllegalArgumentException("Template not found: " + templateId);
+        var tpl = tplOpt.get();
 
         var stepInstances = new ArrayList<StepInstance>();
-        for (var sd : template.steps) {
+        for (var sd : tpl.steps) {
+            // create the step instance always so we keep a stable step list
+            var si = new StepInstance(sd.id, sd.name, sd.role);
+
+            // evaluate simple condition key=value if present
             if (sd.condition != null && !sd.condition.isBlank()) {
                 var parts = sd.condition.split("=", 2);
-                if (parts.length != 2) continue;
-
-                var val = req.metadata.get(parts[0]);
-                if (val == null || !val.equals(parts[1])) continue;
-
-                stepInstances.add(new StepInstance(sd.id, sd.name, sd.role));
+                if (parts.length == 2) {
+                    var key = parts[0].trim();
+                    var expected = parts[1].trim();
+                    var actual = req.metadata.get(key);
+                    if (actual == null || !actual.equals(expected)) {
+                        // mark SKIPPED — keep step in list but no action required
+                        si.markSkipped();
+                        stepInstances.add(si);
+                        continue;
+                    }
+                }
             }
+            stepInstances.add(si);
         }
 
-        // preflight: ensure at least one user per role in tenant (fail fast)
+        // preflight: ensure at least one approver exists for each role that is NOT SKIPPED
+        var rolesNeeded = stepInstances.stream()
+                .filter(s -> s.status == StepStatus.PENDING) // only pending steps need approvers
+                .map(s -> s.role)
+                .distinct()
+                .toList();
 
-        var rolesNeeded = stepInstances.stream().map(si -> si.role).collect(Collectors.groupingBy(r -> r));
-
-        for (var role : rolesNeeded.keySet()) {
-            var candidates = users.findByTenantAndRole(req.tenantId, role);
-            if (candidates.isEmpty()) {
-                throw new IllegalArgumentException("no approvers for role" + role + " in tenant " + req.tenantId);
-            }
+        for (var role : rolesNeeded) {
+            var candidates = userRepo.findByTenantAndRole(req.tenantId, role);
+            if (candidates == null || candidates.isEmpty())
+                throw new IllegalStateException("No approvers in tenant '" + req.tenantId + "' for role: " + role);
         }
 
-        var wi = new WorkFlowInstance(template.id, template.version, stepInstances);
-        req.workFlowInstance = wi;
-        req.status = wi.steps.isEmpty() ? RequestStatus.APPROVED : RequestStatus.IN_REVIEW;
-        requests.save(req);
+        var wi = new WorkflowInstance(tpl.id, tpl.version, stepInstances);
+        // set currentIndex to first non-skipped step (or 0 if none)
+        int firstPending = -1;
+        for (int i = 0; i < stepInstances.size(); i++) {
+            if (stepInstances.get(i).status == StepStatus.PENDING) { firstPending = i; break; }
+        }
+        if (firstPending == -1) {
+            // no pending steps -> auto-approved
+            wi.currentIndex = stepInstances.size(); // point past last
+            req.workflowInstance = wi;
+            req.status = RequestStatus.APPROVED;
+        } else {
+            wi.currentIndex = firstPending;
+            req.workflowInstance = wi;
+            req.status = RequestStatus.IN_REVIEW;
+        }
+
+        requestRepo.save(req);
         return req;
     }
 
+
     public Request act(String approverId, String requestId, Action action, String comment) {
-        Request request = null;
         synchronized (("REQ_LOCK_" + requestId).intern()) {
-            var user = users.findById(approverId).orElseThrow();
-            var req = requests.findById(requestId).orElseThrow();
+            var userOpt = userRepo.findById(approverId);
+            if (userOpt == null || userOpt.isEmpty()) throw new IllegalArgumentException("Approver not found: " + approverId);
+            var user = userOpt.get();
 
-            if (!user.tenantId().equals(approverId)) {
-                throw new SecurityException("Tenant mismatch");
+            var reqOpt = requestRepo.findById(requestId);
+            if (reqOpt == null || reqOpt.isEmpty()) throw new IllegalArgumentException("Request not found: " + requestId);
+            var req = reqOpt.get();
+
+            // tenant guard
+            if (!user.tenantId().equals(req.tenantId)) {
+                String msg = String.format("Tenant mismatch: user[%s]=%s request[%s]=%s", user.id(), user.tenantId(), req.id, req.tenantId);
+//                System.out.println("[DEBUG] " + msg);
+                throw new SecurityException(msg);
             }
 
-            if (req.requesterId.equals(approverId)) {
-                throw new SecurityException("requester can not act");
-            }
+            // requester can't act
+            if (req.requesterId.equals(approverId)) throw new SecurityException("Requester cannot act on their own request: " + approverId);
 
-            var wi = req.workFlowInstance;
-            if (wi == null) {
-                throw new IllegalStateException("not submitted");
-            }
+            var wi = req.workflowInstance;
+            if (wi == null) throw new IllegalStateException("Request not submitted to workflow: " + requestId);
+
             if (req.status != RequestStatus.IN_REVIEW) {
-                throw new IllegalStateException("not in review");
+                throw new IllegalStateException("Request not in review: " + req.status);
             }
 
             int idx = wi.currentIndex;
             if (idx < 0 || idx >= wi.steps.size()) {
-                throw new IllegalStateException("no active step");
-            }
-            var si = wi.steps.get(idx);
-            if (!user.roles().contains(si.role)) {
-                throw new SecurityException("user role mismatch");
+                throw new IllegalStateException("No active step for request: " + requestId + " (currentIndex=" + idx + ", steps=" + wi.steps.size() + ")");
             }
 
+            var si = wi.steps.get(idx);
+
+            // debug: print current step status before action (optional)
+//            System.out.println("[DEBUG] Acting on request=" + requestId + " currentStepIndex=" + idx + " stepId=" + si.stepId + " stepStatus=" + si.status);
+
+            if (!user.roles().contains(si.role)) {
+                throw new SecurityException("User role mismatch. Required: " + si.role + ", user roles: " + user.roles());
+            }
+
+            // mark action
             si.mark(action, approverId, comment);
+//            System.out.println("[DEBUG] Step " + si.stepId + " marked " + si.status + " by " + approverId);
+
             if (action == Action.REJECT) {
                 req.status = RequestStatus.REJECTED;
-                requests.save(req);
-                request = req;
+                requestRepo.save(req);
+                return req;
             }
 
-            int next = idx + 1;
-
-            while (next < wi.steps.size() && wi.steps.get(next).status != StepStatus.PENDING) {
-                next++;
+            // APPROVE: find next PENDING step (skip SKIPPED)
+            int nextPending = -1;
+            for (int i = idx + 1; i < wi.steps.size(); i++) {
+                var s = wi.steps.get(i);
+                if (s.status == StepStatus.PENDING) { nextPending = i; break; }
             }
-            wi.currentIndex = next;
-            if (next >= wi.steps.size()) {
+
+            if (nextPending == -1) {
+                // no more pending steps -> fully approved
+                wi.currentIndex = wi.steps.size(); // point past last
                 req.status = RequestStatus.APPROVED;
-            }
-            else {
+            } else {
+                // move to next pending step
+                wi.currentIndex = nextPending;
                 req.status = RequestStatus.IN_REVIEW;
-                requests.save(req);
-                request = req;
             }
+
+            requestRepo.save(req);
+            return req;
         }
-        return request;
     }
 
+
     public List<Request> tasksForApprover(String approverId) {
-        var user = users.findById(approverId).orElseThrow();
+        var user = userRepo.findById(approverId).orElseThrow();
         var tenant = user.tenantId();
         var results = new ArrayList<Request>();
 
-        for (var r : requests.findByTenant(tenant)) {
-            if (r.workFlowInstance == null || r.status != RequestStatus.IN_REVIEW) continue;
-            var idx = r.workFlowInstance.currentIndex;
-            if (idx < 0 || idx >= r.workFlowInstance.steps.size()) continue;
-            var si = r.workFlowInstance.steps.get(idx);
+        for (var r : requestRepo.findByTenant(tenant)) {
+            if (r.workflowInstance == null || r.status != RequestStatus.IN_REVIEW) continue;
+            var idx = r.workflowInstance.currentIndex;
+            if (idx < 0 || idx >= r.workflowInstance.steps.size()) continue;
+            var si = r.workflowInstance.steps.get(idx);
             if (user.roles().contains(si.role)) {
                 results.add(r);
             }
